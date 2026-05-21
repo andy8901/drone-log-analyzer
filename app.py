@@ -1,0 +1,108 @@
+from flask import Flask, render_template, request, send_file
+from werkzeug.utils import secure_filename
+from uuid import uuid4
+import os
+
+from analyzer import process_log
+from reports import generate_excel, generate_word_report
+
+app = Flask(__name__)
+
+UPLOAD_FOLDER = 'uploads'
+REPORT_FOLDER = 'reports_out'
+
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
+
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(REPORT_FOLDER, exist_ok=True)
+
+ALLOWED_EXTENSIONS = {'bin', 'log', 'tlog'}
+
+session_cache = {}
+
+
+def allowed_file(filename):
+    return '.' in filename and \
+           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+@app.route("/", methods=["GET", "POST"])
+def index():
+
+    if request.method == "POST":
+
+        mission = {
+            "drone": request.form.get('drone'),
+            "msn": request.form.get('msn'),
+            "date": request.form.get('date'),
+            "reported_by": request.form.get('reported_by')
+        }
+
+        file = request.files.get('log_file')
+
+        if not file:
+            return "No file selected", 400
+
+        if not allowed_file(file.filename):
+            return "Invalid file type", 400
+
+        filename = secure_filename(file.filename)
+
+        upload_path = os.path.join(
+            app.config['UPLOAD_FOLDER'],
+            filename
+        )
+
+        file.save(upload_path)
+
+        try:
+            report = process_log(upload_path)
+
+            report_id = str(uuid4())
+
+            session_cache[report_id] = {
+                "report": report,
+                "mission": mission
+            }
+
+            return render_template(
+                "dashboard.html",
+                data=session_cache[report_id],
+                report_id=report_id
+            )
+
+        except Exception as e:
+            return f"Processing Failed: {str(e)}", 500
+
+    return render_template("dashboard.html", data=None)
+
+@app.route("/export/<report_id>/<fmt>")
+def export(report_id, fmt):
+
+    data = session_cache.get(report_id)
+
+    if not data:
+        return "No report found", 404
+
+    ext = 'docx' if fmt == 'word' else 'xlsx'
+
+    filename = f"Neosky_Report_{report_id}.{ext}"
+
+    path = os.path.join(REPORT_FOLDER, filename)
+
+    if fmt == 'word':
+        generate_word_report(
+            data['report'],
+            data['mission'],
+            path
+        )
+    else:
+        generate_excel(
+            data['report'],
+            path
+        )
+
+    return send_file(path, as_attachment=True)
+
+if __name__ == "__main__":
+    app.run(debug=True)
