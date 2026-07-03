@@ -211,11 +211,17 @@ def process_log(file_path):
 
         elif m_type == "BARO":
 
-            tele["alt_baro"].append(
-                d.get('Alt', 0)
-            )
+            alt = d.get('Alt', 0)
 
-        # =================================================
+            tele["alt_baro"].append(alt)
+
+            if "TimeUS" in d:
+                tele["baro_time"].append(
+                    round((d["TimeUS"] - start_ts) / 1000000, 2)
+                )
+
+                tele["baro_alt"].append(alt)
+     # =================================================
         # IMU
         # =================================================
 
@@ -581,9 +587,11 @@ def process_log(file_path):
 
         {
             "cat": "1.0 Flight",
-            "param": "Flight Duration (Min)",
-            "std": 15,
-            **get_stats([duration_min], 15)
+            "param": f"Flight Duration ({duration_min})",
+            "min": "-",
+            "max": duration_min,
+            "avg": "-",
+            "dev": "-"
         },
 
         {
