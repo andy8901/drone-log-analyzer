@@ -1,0 +1,37 @@
+# Render Blueprint - https://render.com/docs/blueprint-spec
+# Lets you deploy this app with one click via:
+#   https://render.com/deploy?repo=https://github.com/andy8901/drone-log-analyzer
+#
+# Render builds and runs the existing Dockerfile as-is; nothing else to configure.
+
+services:
+  - type: web
+    name: drone-log-analyzer
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /
+    envVars:
+      - key: FLASK_DEBUG
+        value: "0"
+
+# NOTE on persistent storage (read before relying on this for real incident data):
+#
+# Render's "free" plan has an EPHEMERAL filesystem -- everything written at
+# runtime (uploads/, sessions/, reports_out/, and importantly archive/logs/ +
+# archive/manifest.jsonl, which are meant to hold every uploaded log
+# permanently) is wiped on every deploy, restart, or spin-down/spin-up cycle
+# (free services also spin down after ~15 min idle and cold-start on the next
+# request).
+#
+# To make the archive actually persistent, attach a Render Disk (requires the
+# paid "Starter" plan or higher) mounted at /app/archive, e.g.:
+#
+#   plan: starter
+#   disk:
+#     name: drone-log-data
+#     mountPath: /app/archive
+#     sizeGB: 10
+#
+# Left off by default here since it costs money -- add it once you've decided
+# on a plan/retention policy for the archived logs.

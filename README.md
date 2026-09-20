@@ -48,16 +48,28 @@ Open http://localhost:8080
 
 The app is packaged with a production `Dockerfile` (Gunicorn, binds to the
 `PORT` env var, debug off) — any host that can build a Docker image and give
-you a public URL works. Two easy options:
+you a public URL works.
 
-### Render (recommended for a quick free link)
+### Render (one-click, via the included Blueprint)
 
-1. Push this repo to GitHub (already done).
-2. On [render.com](https://render.com) → **New +** → **Web Service** → connect
-   this repo.
-3. Render auto-detects the `Dockerfile`. Leave the port unset (the app reads
-   `PORT` from the environment automatically).
-4. Deploy — Render gives you a public `https://<name>.onrender.com` URL.
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/andy8901/drone-log-analyzer)
+
+`render.yaml` in this repo is a [Render Blueprint](https://render.com/docs/blueprint-spec):
+clicking the button above (or **New +** → **Blueprint** on
+[render.com](https://render.com) → connect this repo) builds the existing
+`Dockerfile` with nothing else to configure, and gives you a public
+`https://<name>.onrender.com` URL. Deploying requires your own Render account
+— this is a link for you to click, not something that can be done on your
+behalf without your login.
+
+**Read this before relying on it for real incident data:** the default
+`render.yaml` uses Render's free plan, which has an *ephemeral* filesystem —
+everything written at runtime, including `archive/logs/` and
+`archive/manifest.jsonl` (meant to hold every uploaded log permanently, see
+below), is wiped on every deploy, restart, or free-plan spin-down. To make
+the archive actually persistent, attach a Render Disk mounted at
+`/app/archive` (requires upgrading to the paid "Starter" plan or higher) —
+see the commented-out example at the bottom of `render.yaml`.
 
 ### Railway / Fly.io / any Docker host
 
@@ -67,13 +79,18 @@ you a public URL works. Two easy options:
   `Dockerfile`, then `fly deploy`.
 - **Any VPS**: `docker build -t drone-log-analyzer . && docker run -p 8080:8080 drone-log-analyzer`.
 
+These have the same ephemeral-storage caveat as Render's free plan unless you
+attach persistent storage (a Railway Volume, a Fly.io Volume, or just a real
+disk on a VPS).
+
 ### Notes for production
 
-- Uploaded logs are deleted right after processing; nothing is retained on
-  disk beyond the JSON report needed to serve the "Download Word/Excel"
-  buttons (stored in `sessions/`).
-- `reports_out/`, `uploads/`, and `sessions/` are gitignored — don't commit
-  generated reports or uploaded logs.
+- Every uploaded log is archived permanently under `archive/logs/`, with a
+  `archive/manifest.jsonl` entry recording its outcome (status, top alerts,
+  full conclusion) — see the persistent-storage note above for what that
+  requires on your chosen host.
+- `reports_out/`, `uploads/`, `sessions/`, and `archive/` are gitignored —
+  don't commit generated reports, uploaded logs, or the archive.
 - There's no authentication — anyone with the link can upload logs and
   generate reports. Add auth in front of it (e.g. your host's built-in basic
   auth, or a proxy) if the link will be shared outside a trusted group.
