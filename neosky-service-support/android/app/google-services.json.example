@@ -1,0 +1,30 @@
+{
+  "//": "This is a REFERENCE STRUCTURE ONLY — not a real Firebase config. Replace it with the actual google-services.json you download from your Firebase Console project (Project settings > Your apps > Android app com.neosky.servicesupport), save it as 'app/google-services.json' (no .example suffix), and remove this comment field (real files never have one). See android/README.md for the full setup steps.",
+  "project_info": {
+    "project_number": "000000000000",
+    "project_id": "neosky-service-support-example",
+    "storage_bucket": "neosky-service-support-example.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:000000000000:android:0000000000000000000000",
+        "android_client_info": {
+          "package_name": "com.neosky.servicesupport"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "REPLACE_WITH_YOUR_FIREBASE_ANDROID_API_KEY"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
