@@ -1,3 +1,4 @@
+import bisect
 import os
 import glob
 import math
@@ -38,6 +39,49 @@ CRITICAL_PARAM_PREFIXES = (
 )
 
 BASELINE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "baselines")
+
+# ArduPilot's dataflash "EV" message only logs a numeric event ID, no text, and
+# there's no verified upstream LogEvent enum available in this environment to
+# decode the full set from. These specific IDs were cross-checked empirically
+# against real flight logs (10/11 confirmed by co-occurring, at the exact same
+# TimeUS, with the plain-text "Crash: Disarming" MSG in an actual crash log;
+# 15/17/18/28/56/57 inferred from their consistent, physically-sensible
+# placement relative to that anchor across multiple arm/disarm cycles). Any ID
+# not in this table is shown as "Event ID <n>" rather than guessed.
+EV_EVENT_NAMES = {
+    10: "ARMED",
+    11: "DISARMED",
+    15: "AUTO ARMED",
+    17: "LAND COMPLETE MAYBE",
+    18: "LAND COMPLETE",
+    28: "NOT LANDED",
+    56: "MOTOR INTERLOCK DISABLED",
+    57: "MOTOR INTERLOCK ENABLED",
+}
+
+# ArduPilot SRV_Channel motor function IDs (Motor1..Motor8). Used to identify
+# which RCOU (servo/motor output) channels are actually motors, for the
+# "motor outputs" fallback graph when ESC RPM telemetry isn't available.
+MOTOR_FUNCTION_IDS = set(range(33, 41))
+
+
+def format_mmss(t):
+    sign = "-" if t < 0 else ""
+    t = abs(t)
+    return f"{sign}{int(t // 60):02d}:{int(t % 60):02d}"
+
+
+def nearest_value(times, values, query_t):
+    """Value from `values` whose matching `times` entry is closest to query_t."""
+    if not times:
+        return None
+    i = bisect.bisect_left(times, query_t)
+    if i <= 0:
+        return values[0]
+    if i >= len(times):
+        return values[-1]
+    before, after = times[i - 1], times[i]
+    return values[i - 1] if (query_t - before) <= (after - query_t) else values[i]
 
 # Alert -> section mapping for the dashboard/report ("all failsafes in their own
 # section" etc). Matched by keyword against the alert text, first match wins.
@@ -331,7 +375,8 @@ def process_log(file_path, drone_model=None):
     alerts = []
     flight_modes = []
     gps_path = []
-    arm_events = []      # [{t, state}] state in {"ARMED", "DISARMED"}, text-detected
+    gps_path_time = []   # parallel to gps_path (same append points, so always aligned)
+    arm_events = []      # [{t, state}] state in {"ARMED", "DISARMED"}, from MSG text or EV 10/11
     photo_events = []    # [t, ...] CAM trigger timestamps
 
     start_ts = None
@@ -432,6 +477,7 @@ def process_log(file_path, drone_model=None):
                     lon = lon / 1e7
 
                 gps_path.append([lat, lon])
+                gps_path_time.append(rel_time(d["TimeUS"]) if "TimeUS" in d else 0)
                 tele["lat"].append(lat)
                 tele["lon"].append(lon)
 
@@ -521,6 +567,15 @@ def process_log(file_path, drone_model=None):
                 tele["esc_rpm"].append(rpm)
                 tele["esc_time"].append(rel_time(d["TimeUS"]))
 
+        # ---------------- MOTOR/SERVO OUTPUTS (fallback when no ESC RPM) ----------------
+
+        elif m_type == "RCOU":
+            if "TimeUS" in d:
+                t = rel_time(d["TimeUS"])
+                tele["rcout_time"].append(t)
+                for n in range(1, 9):
+                    tele[f"rcout_c{n}"].append(d.get(f"C{n}", 0))
+
         # ---------------- CAMERA TRIGGER ----------------
 
         elif m_type == "CAM":
@@ -558,11 +613,14 @@ def process_log(file_path, drone_model=None):
                     arm_events.append({"t": t, "state": "ARMED"})
 
             else:  # EV -- dataflash only logs a numeric event ID here, no text.
-                # We don't have a verified ArduPilot LogEvent ID table in this
-                # environment, so we deliberately show the raw ID rather than
-                # guess a label (e.g. mislabeling ARMED/DISARMED in a crash
-                # report would be worse than an unlabeled but honest entry).
-                timeline.append({"t": t, "type": "EV", "text": f"Event ID {d.get('Id')}"})
+                eid = d.get("Id")
+                name = EV_EVENT_NAMES.get(eid)
+                timeline.append({"t": t, "type": "EV", "text": name or f"Event ID {eid}"})
+
+                if eid == 10:
+                    arm_events.append({"t": t, "state": "ARMED"})
+                elif eid == 11:
+                    arm_events.append({"t": t, "state": "DISARMED"})
 
     # mavutil keeps the log file open for the lifetime of this object; close
     # it explicitly so the caller can safely delete the uploaded file right
@@ -574,14 +632,39 @@ def process_log(file_path, drone_model=None):
     # =====================================================
 
     session_duration_min = round((end_ts - start_ts) / 60000000, 2) if start_ts and end_ts else 0
+    log_end_t = round((end_ts - start_ts) / 1000000, 3) if start_ts and end_ts else 0
 
     log_disarmed = params_dump.get("LOG_DISARMED", 0)
-    first_arm = next((e["t"] for e in arm_events if e["state"] == "ARMED"), None)
-    last_disarm = next((e["t"] for e in reversed(arm_events) if e["state"] == "DISARMED"), None)
 
-    if first_arm is not None and last_disarm is not None and last_disarm > first_arm:
-        flight_duration_min = round((last_disarm - first_arm) / 60, 2)
-        flight_duration_source = "arm/disarm markers found in the log"
+    # Pair ARMED/DISARMED events chronologically and sum only the armed
+    # intervals -- a log can contain multiple arm/disarm cycles (e.g. bench
+    # tests before the actual flight), and naively using "first arm to last
+    # disarm" would wrongly include the disarmed gaps between them.
+    armed_cycles = []
+    armed_since = None
+    for e in arm_events:
+        if e["state"] == "ARMED" and armed_since is None:
+            armed_since = e["t"]
+        elif e["state"] == "DISARMED" and armed_since is not None:
+            armed_cycles.append((armed_since, e["t"]))
+            armed_since = None
+    if armed_since is not None:
+        armed_cycles.append((armed_since, log_end_t))  # still armed at EOF
+
+    if armed_cycles:
+        total_armed_min = round(sum(end - start for start, end in armed_cycles) / 60, 2)
+        flight_duration_min = total_armed_min
+        cycle_note = f", {len(armed_cycles)} arm/disarm cycle(s)" if len(armed_cycles) > 1 else ""
+        # LOG_DISARMED=0 pauses (doesn't stop) logging while disarmed, so one
+        # file can hold several cycles. If the log's very first arm-state event
+        # is a DISARMED with no preceding ARMED, an earlier armed period began
+        # before recording started and isn't counted here.
+        truncated_note = (
+            "; an earlier armed period may have started before this log began"
+            if arm_events and arm_events[0]["state"] == "DISARMED"
+            else ""
+        )
+        flight_duration_source = f"arm/disarm markers found in the log{cycle_note}{truncated_note}"
     elif not log_disarmed:
         # LOG_DISARMED=0 (this fleet's default): the dataflash log only records
         # while armed, so its full span IS the flight duration.
@@ -643,6 +726,23 @@ def process_log(file_path, drone_model=None):
         if dist > 50:
             alerts.append("GPS POSITION JUMP DETECTED")
             break
+
+    # ---------------- HOME LOCATION / FARTHEST RANGE ----------------
+    # "Home" here is the first GPS fix recorded in the log (a common convention
+    # when a dedicated HOME-set marker isn't reliably available) -- it may
+    # differ slightly from ArduPilot's own HOME parameter if that was set
+    # before the log's first GPS fix.
+
+    home_point = gps_path[0] if gps_path else None
+    farthest_point = None
+    max_range_m = 0
+
+    if home_point:
+        for p in gps_path:
+            d = gps_distance(home_point[0], home_point[1], p[0], p[1])
+            if d > max_range_m:
+                max_range_m = d
+                farthest_point = p
 
     # ---------------- SUDDEN-VARIATION / POSSIBLE CRASH DETECTION ----------------
 
@@ -860,23 +960,57 @@ def process_log(file_path, drone_model=None):
     if tele["esc_rpm"]:
         et, erpm = downsample(tele["esc_time"], tele["esc_rpm"])
         charts["motor_rpm"] = {"t": et, "rpm": erpm}
+        charts["motor_outputs"] = {"t": [], "series": {}}
     else:
         charts["motor_rpm"] = {"t": [], "rpm": []}
 
-    display_gps_path = decimate_list(gps_path, max_points=2000)
+        # Fallback: no ESC RPM telemetry, so chart raw motor PWM output (RCOU)
+        # instead. Identify which RCOU channels are actually motors from this
+        # log's own SERVOn_FUNCTION params (33-40 = Motor1-8); fall back to
+        # C1-C4 (the common quad layout) if that metadata isn't present.
+        motor_channels = []
+        for name, val in params_dump.items():
+            if not (name.startswith("SERVO") and name.endswith("_FUNCTION")):
+                continue
+            try:
+                fn = int(float(val))
+                n = int(name[len("SERVO"):-len("_FUNCTION")])
+            except (TypeError, ValueError):
+                continue
+            if fn in MOTOR_FUNCTION_IDS and 1 <= n <= 8:  # RCOU is only captured for C1-C8
+                motor_channels.append(n)
+        motor_channels.sort()
 
-    # Heading at each displayed GPS point, derived from ATT.Yaw where a timestamp
-    # lines up, else from ground-track bearing between consecutive points -- used
-    # to orient the drone icon during flight replay.
+        if not motor_channels:
+            motor_channels = [1, 2, 3, 4]
+
+        if tele["rcout_time"]:
+            rt, *rest = downsample_multi(
+                tele["rcout_time"], *[tele[f"rcout_c{n}"] for n in motor_channels]
+            )
+            charts["motor_outputs"] = {
+                "t": rt,
+                "series": {f"C{n}": series for n, series in zip(motor_channels, rest)},
+            }
+        else:
+            charts["motor_outputs"] = {"t": [], "series": {}}
+
+    display_gps_path = decimate_list(gps_path, max_points=2000)
+    display_gps_time = decimate_list(gps_path_time, max_points=2000)
+
+    # Heading at each displayed GPS point, from the nearest ATT.Yaw sample by
+    # time (falls back to ground-track bearing client-side when yaw is absent).
     replay_headings = []
     if tele["att_time"] and tele["yaw_act"]:
-        for i in range(len(display_gps_path)):
-            frac = i / max(len(display_gps_path) - 1, 1)
-            idx = min(int(frac * (len(tele["yaw_act"]) - 1)), len(tele["yaw_act"]) - 1)
-            replay_headings.append(round(tele["yaw_act"][idx], 1))
+        replay_headings = [
+            round(nearest_value(tele["att_time"], tele["yaw_act"], t), 1)
+            for t in display_gps_time
+        ]
 
     timeline.sort(key=lambda e: e["t"])
-    events_log = [f"[{e['t']}s] [{e['type']}] {e['text']}" for e in timeline]
+    for e in timeline:
+        e["t_min"] = format_mmss(e["t"])
+    events_log = [f"[{e['t_min']}] [{e['type']}] {e['text']}" for e in timeline]
 
     conclusion = build_conclusion(
         status, alerts,
@@ -898,6 +1032,7 @@ def process_log(file_path, drone_model=None):
         "timeline": timeline,
         "params": params_dump,
         "gps_path": display_gps_path,
+        "gps_path_time": display_gps_time,
         "replay_headings": replay_headings,
         "flight_modes": list(dict.fromkeys(flight_modes)),
         "charts": charts,
@@ -931,5 +1066,10 @@ def process_log(file_path, drone_model=None):
             "avg_hdop": avg_hdop,
             "max_vibration": max_vibe,
             "vibration_source": vibration_source,
+            "home_lat": round(home_point[0], 6) if home_point else None,
+            "home_lon": round(home_point[1], 6) if home_point else None,
+            "max_range_m": round(max_range_m, 1),
+            "farthest_lat": round(farthest_point[0], 6) if farthest_point else None,
+            "farthest_lon": round(farthest_point[1], 6) if farthest_point else None,
         },
     }

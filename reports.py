@@ -21,7 +21,7 @@ def generate_word_report(report_data, mission_info, output_path):
     summary = report_data.get("summary", {})
 
     doc.add_heading("1.0 Mission Details", level=1)
-    table = doc.add_table(rows=10, cols=2)
+    table = doc.add_table(rows=11, cols=2)
     table.style = "Table Grid"
     info = [
         ("Drone Model:", mission_info.get("drone")),
@@ -34,6 +34,12 @@ def generate_word_report(report_data, mission_info, output_path):
         ("Log/Session Duration:", f"{summary.get('session_duration')} min"),
         ("Initial / Final Voltage:", f"{summary.get('initial_voltage')}V / {summary.get('final_voltage')}V"),
         ("Camera:", f"{report_data.get('camera', {}).get('photo_count', 0)} photo trigger(s) logged"),
+        (
+            "Farthest Range from Home:",
+            f"{summary.get('max_range_m')} m (home = first GPS fix at "
+            f"{summary.get('home_lat')}, {summary.get('home_lon')})"
+            if summary.get("home_lat") is not None else "No GPS fix in log",
+        ),
     ]
     for i, (k, v) in enumerate(info):
         table.rows[i].cells[0].text, table.rows[i].cells[1].text = k, str(v)
@@ -88,11 +94,11 @@ def generate_word_report(report_data, mission_info, output_path):
         doc.add_heading("6.0 Event Timeline (modes, errors, messages)", level=1)
         t = doc.add_table(rows=1, cols=3)
         t.style = "Table Grid"
-        for i, txt in enumerate(["Time (s)", "Type", "Message"]):
+        for i, txt in enumerate(["Time (mm:ss)", "Type", "Message"]):
             t.rows[0].cells[i].text = txt
         for e in report_data["timeline"]:
             row = t.add_row().cells
-            row[0].text, row[1].text, row[2].text = str(e["t"]), e["type"], e["text"]
+            row[0].text, row[1].text, row[2].text = e.get("t_min", str(e["t"])), e["type"], e["text"]
 
     doc.add_page_break()
     doc.add_heading("Appendix: Full Parameter Dump", level=1)
@@ -136,6 +142,9 @@ def generate_excel(report_data, output_path):
             list(report_data["params"].items()), columns=["Parameter", "Value"]
         ).to_excel(writer, sheet_name="Parameters", index=False)
 
-        pd.DataFrame(report_data.get("timeline", [])).to_excel(
-            writer, sheet_name="Timeline", index=False
-        )
+        timeline_df = pd.DataFrame(report_data.get("timeline", []))
+        if not timeline_df.empty:
+            timeline_df = timeline_df[["t_min", "type", "text", "t"]].rename(
+                columns={"t_min": "Time (mm:ss)", "type": "Type", "text": "Message", "t": "Time (s)"}
+            )
+        timeline_df.to_excel(writer, sheet_name="Timeline", index=False)
