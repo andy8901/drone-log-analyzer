@@ -108,11 +108,15 @@ def index():
             )
 
         except Exception as e:
+            app.logger.exception("Log processing failed for %s", upload_path)
             return f"Processing Failed: {str(e)}", 500
 
         finally:
-            if os.path.exists(upload_path):
-                os.remove(upload_path)
+            try:
+                if os.path.exists(upload_path):
+                    os.remove(upload_path)
+            except OSError:
+                app.logger.warning("Could not remove upload %s", upload_path, exc_info=True)
 
     return render_template("dashboard.html", data=None)
 
