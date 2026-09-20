@@ -18,8 +18,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the rest of your application code
 COPY . .
 
-# Create the dynamic directories required by your app
-RUN mkdir -p uploads reports_out sessions
+# Create the dynamic directories required by your app (app.py also creates
+# these itself at startup with exist_ok=True, so this is just a head start)
+RUN mkdir -p uploads reports_out sessions archive/logs
 
 # Default port; most PaaS hosts (Render, Railway, ...) override this via $PORT
 ENV PORT=8080
