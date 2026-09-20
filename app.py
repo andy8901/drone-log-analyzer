@@ -12,11 +12,17 @@ from reports import generate_excel, generate_word_report
 
 app = Flask(__name__)
 
-UPLOAD_FOLDER = 'uploads'
-REPORT_FOLDER = 'reports_out'
-SESSION_FOLDER = 'sessions'
-ARCHIVE_FOLDER = 'archive/logs'
-MANIFEST_PATH = 'archive/manifest.jsonl'
+# Absolute paths (resolved against the CWD at import time) rather than plain
+# relative strings: Flask's send_file() resolves a relative path against its
+# own root_path, not the process CWD -- those coincide when running
+# `python app.py` normally, but not under a PyInstaller-frozen .exe (where
+# root_path lands inside the temp extraction bundle). Absolute paths remove
+# the ambiguity for every caller (send_file, open, os.path.exists, ...).
+UPLOAD_FOLDER = os.path.abspath('uploads')
+REPORT_FOLDER = os.path.abspath('reports_out')
+SESSION_FOLDER = os.path.abspath('sessions')
+ARCHIVE_FOLDER = os.path.abspath('archive/logs')
+MANIFEST_PATH = os.path.abspath('archive/manifest.jsonl')
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
