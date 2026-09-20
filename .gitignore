@@ -18,3 +18,8 @@ archive/*
 .env
 *.venv/
 venv/
+
+# PyInstaller build output for the desktop .exe (see build_exe.bat)
+build/
+dist/
+*.spec

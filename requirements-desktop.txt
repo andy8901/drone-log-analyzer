@@ -1,0 +1,8 @@
+# Extra dependencies for the standalone desktop (.exe) build only -- not
+# needed for the web/Docker deployment (which uses requirements.txt + gunicorn).
+#
+# Install both files before building:
+#   pip install -r requirements.txt -r requirements-desktop.txt
+
+waitress==3.0.2
+pyinstaller==6.22.3

@@ -44,6 +44,38 @@ python app.py
 
 Open http://localhost:8080
 
+## Desktop app (.exe) — no hosting, no link, runs locally
+
+If you don't need a shared link and just want to run this on your own
+Windows machine for free with no server, package it as a standalone `.exe`.
+Double-clicking it starts the app and opens your browser to it automatically;
+closing the console window stops it. Everything it saves (`uploads/`,
+`reports_out/`, `sessions/`, `archive/`) is created right next to the `.exe`
+file and persists between runs — the archive of every uploaded log
+(added earlier) fully applies here since, unlike Render's free tier, there's
+no ephemeral filesystem to worry about.
+
+**Build it on Windows** (PyInstaller doesn't cross-compile — this has to run
+on an actual Windows machine, not WSL/Linux/Mac, to produce a working `.exe`):
+
+```powershell
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt -r requirements-desktop.txt
+build_exe.bat
+```
+
+The `.exe` lands at `dist\NeoskyDroneAnalyzer.exe`. Copy that single file
+anywhere — a folder on your Desktop, a USB drive, a shared network folder —
+and double-click it. No Python install needed on the machine you copy it to.
+
+Trade-offs vs. the web deployment: each person needs their own copy of the
+`.exe` (no single shared link/archive across a team), you have to rebuild and
+re-share it whenever the code changes, it's Windows-only, and Windows
+SmartScreen will likely warn about it being from an "unrecognized publisher"
+the first time it's run (expected for an unsigned executable — click
+"More info" → "Run anyway").
+
 ## Deploying it so you can share a link
 
 The app is packaged with a production `Dockerfile` (Gunicorn, binds to the
