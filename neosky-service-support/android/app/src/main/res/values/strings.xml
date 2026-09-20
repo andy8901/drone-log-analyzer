@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">NeoSky Service &amp; Support</string>
+    <string name="default_notification_channel_id">neosky_default_channel</string>
+</resources>

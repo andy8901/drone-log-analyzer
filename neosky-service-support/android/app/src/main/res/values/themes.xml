@@ -1,0 +1,11 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Base application theme — Compose supplies the real Material3 theme (see presentation/theme).
+         This XML theme only backs the launch window / splash before Compose takes over. -->
+    <style name="Theme.NeoSkyServiceSupport" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/splash_background</item>
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+        <item name="postSplashScreenTheme">@style/Theme.NeoSkyServiceSupport.Main</item>
+    </style>
+
+    <style name="Theme.NeoSkyServiceSupport.Main" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>
