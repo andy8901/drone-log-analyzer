@@ -12,6 +12,9 @@ reports_out/*
 sessions/*
 !sessions/.gitkeep
 
+archive/*
+!archive/.gitkeep
+
 .env
 *.venv/
 venv/

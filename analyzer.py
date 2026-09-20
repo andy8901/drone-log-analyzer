@@ -39,6 +39,28 @@ CRITICAL_PARAM_PREFIXES = (
 
 BASELINE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "baselines")
 
+# Alert -> section mapping for the dashboard/report ("all failsafes in their own
+# section" etc). Matched by keyword against the alert text, first match wins.
+ALERT_CATEGORY_RULES = [
+    ("Failsafes & Crash Detection", ("FAILSAFE", "CRASH CHECK", "THRUST LOSS", "CRASH DETECTED")),
+    ("EKF / Navigation", ("EKF",)),
+    ("Battery & Power", ("BATTERY", "VOLTAGE", "CURRENT")),
+    ("GPS", ("GPS",)),
+    ("Vibration", ("VIBRATION", "CLIPPING")),
+    ("Attitude Control", ("ATTITUDE",)),
+    ("Compass", ("COMPASS", "MAGNETIC")),
+    ("Possible Crash / Anomaly", ("POSSIBLE CRASH", "SUDDEN", "COLLISION")),
+    ("Parameter Deviations", ("PARAMETER", "DEVIATE")),
+]
+
+
+def categorize_alert(text):
+    upper = text.upper()
+    for category, keywords in ALERT_CATEGORY_RULES:
+        if any(k in upper for k in keywords):
+            return category
+    return "Other"
+
 
 # =========================================================
 # HELPER FUNCTIONS
@@ -160,10 +182,87 @@ def compare_to_baseline(params_dump, drone_model):
     return os.path.basename(path), deviations
 
 
-def build_conclusion(status, alerts, summary, param_deviations, drone_model):
+def detect_sudden_events(bat_time, volt, curr, baro_time, alt_baro, esc_time, esc_rpm):
+    """
+    Flag sample-to-sample jumps big enough to suggest a physical event (impact,
+    prop loss, mid-air collision) rather than normal flight dynamics. Heuristic,
+    advisory only -- a fast intentional descent or a hard punch-out can also
+    trigger these, so they're reported as "possible", not definitive.
+    """
+    incidents = []
+
+    for i in range(1, len(volt)):
+        dt = bat_time[i] - bat_time[i - 1]
+        if 0 < dt <= 1.0 and (volt[i - 1] - volt[i]) > 1.5:
+            incidents.append({
+                "t": bat_time[i], "type": "VOLTAGE",
+                "text": f"Sudden voltage drop ({volt[i - 1]}V → {volt[i]}V in {round(dt, 2)}s)",
+            })
+
+    for i in range(1, len(curr)):
+        dt = bat_time[i] - bat_time[i - 1] if i < len(bat_time) else 0
+        if 0 < dt <= 1.0 and (curr[i] - curr[i - 1]) > 20:
+            incidents.append({
+                "t": bat_time[i], "type": "CURRENT",
+                "text": f"Sudden current surge ({curr[i - 1]}A → {curr[i]}A in {round(dt, 2)}s)",
+            })
+
+    for i in range(1, len(alt_baro)):
+        dt = baro_time[i] - baro_time[i - 1]
+        if 0 < dt <= 1.0 and (alt_baro[i - 1] - alt_baro[i]) / dt > 8:
+            rate = round((alt_baro[i - 1] - alt_baro[i]) / dt, 1)
+            incidents.append({
+                "t": baro_time[i], "type": "ALTITUDE",
+                "text": f"Sudden altitude loss ({rate} m/s)",
+            })
+
+    for i in range(1, len(esc_rpm)):
+        dt = esc_time[i] - esc_time[i - 1]
+        if 0 < dt <= 1.0 and esc_rpm[i - 1] > 200 and (esc_rpm[i - 1] - esc_rpm[i]) / esc_rpm[i - 1] > 0.5:
+            incidents.append({
+                "t": esc_time[i], "type": "RPM",
+                "text": f"Sudden motor RPM drop ({esc_rpm[i - 1]} → {esc_rpm[i]})",
+            })
+
+    return incidents
+
+
+def correlate_incidents(incidents, window=1.5):
+    """Cluster sudden-event flags of *different* types within a short window --
+    that combination (e.g. altitude + voltage + current all jumping together)
+    is a much stronger crash/collision signal than any single channel alone."""
+    incidents = sorted(incidents, key=lambda x: x["t"])
+    flagged = []
+    used = set()
+
+    for i, inc in enumerate(incidents):
+        if i in used:
+            continue
+        cluster = [inc]
+        cluster_idx = [i]
+        for j in range(i + 1, len(incidents)):
+            if incidents[j]["t"] - inc["t"] > window:
+                break
+            if incidents[j]["type"] not in {c["type"] for c in cluster}:
+                cluster.append(incidents[j])
+                cluster_idx.append(j)
+
+        types = {c["type"] for c in cluster}
+        if len(types) >= 2:
+            used.update(cluster_idx)
+            t0 = cluster[0]["t"]
+            flagged.append({
+                "t": t0,
+                "text": f"POSSIBLE CRASH / COLLISION EVENT at t={t0}s — correlated {', '.join(sorted(types))} anomalies",
+            })
+
+    return flagged
+
+
+def build_conclusion(status, alerts, summary, param_deviations, drone_model, possible_incidents):
     lines = []
 
-    duration = summary["duration"]
+    duration = summary["flight_duration"]
 
     if status == "PASS":
         lines.append(
@@ -182,6 +281,14 @@ def build_conclusion(status, alerts, summary, param_deviations, drone_model):
             f"before the next flight."
         )
 
+    if possible_incidents:
+        lines.append(
+            f"{len(possible_incidents)} point(s) in the log show multiple telemetry "
+            f"channels jumping together (see 'Possible Crash / Anomaly' below) — "
+            f"consistent with, but not proof of, an impact or collision. Cross-check "
+            f"against the flight path and event timeline."
+        )
+
     root_cause_hints = [
         ("THRUST", "Inspect motors, ESCs, and propellers immediately — thrust loss can lead to loss of control."),
         ("VIBRATION", "Inspect propellers for damage/imbalance, check motor mounts and frame arms for looseness, and verify propeller clearance from the frame."),
@@ -191,6 +298,7 @@ def build_conclusion(status, alerts, summary, param_deviations, drone_model):
         ("EKF", "Review compass, GPS, and vibration health — EKF instability commonly follows compass interference or high vibration."),
         ("COMPASS", "Check for magnetic interference from nearby power wiring or metal, and consider redoing the compass calibration."),
         ("ATTITUDE", "Review PID tuning (ATC_RAT_* gains) and check for mechanical binding, prop damage, or CG imbalance."),
+        ("CRASH DETECTED", "ArduPilot's own crash-check triggered an automatic disarm — treat as a confirmed impact until inspected."),
     ]
 
     alert_text = " ".join(alerts)
@@ -219,10 +327,12 @@ def process_log(file_path, drone_model=None):
     tele = defaultdict(list)
 
     params_dump = {}
-    events_log = []
+    timeline = []       # [{t, type, text}] chronological: MODE/ERR/MSG/EV/incidents
     alerts = []
     flight_modes = []
     gps_path = []
+    arm_events = []      # [{t, state}] state in {"ARMED", "DISARMED"}, text-detected
+    photo_events = []    # [t, ...] CAM trigger timestamps
 
     start_ts = None
     end_ts = None
@@ -265,12 +375,14 @@ def process_log(file_path, drone_model=None):
             subsys = d.get("Subsys")
             code = d.get("ECode", d.get("Code", 0))
             name = ERROR_SUBSYSTEMS.get(subsys, f"SUBSYSTEM {subsys}")
+            t = rel_time(d["TimeUS"]) if "TimeUS" in d else 0
 
             if code == 0:
-                events_log.append(f"[ERR] {name} RESOLVED")
+                timeline.append({"t": t, "type": "ERR", "text": f"{name} RESOLVED"})
             else:
                 severity = "CRITICAL" if subsys in CRITICAL_SUBSYSTEMS else "WARNING"
                 alerts.append(f"{severity}: {name} ERROR (code {code})")
+                timeline.append({"t": t, "type": "ERR", "text": f"{severity}: {name} ERROR (code {code})"})
 
                 if subsys == 16:
                     ekf_errors += 1
@@ -401,18 +513,56 @@ def process_log(file_path, drone_model=None):
             tele["yaw_rate_act"].append(d.get("Y", 0))
             tele["yaw_rate_des"].append(d.get("YDes", d.get("Y", 0)))
 
+        # ---------------- ESC TELEMETRY (motor RPM, if fitted/logged) ----------------
+
+        elif m_type == "ESC":
+            rpm = d.get("RPM")
+            if rpm is not None and "TimeUS" in d:
+                tele["esc_rpm"].append(rpm)
+                tele["esc_time"].append(rel_time(d["TimeUS"]))
+
+        # ---------------- CAMERA TRIGGER ----------------
+
+        elif m_type == "CAM":
+            t = rel_time(d["TimeUS"]) if "TimeUS" in d else 0
+            photo_events.append(t)
+            timeline.append({"t": t, "type": "CAM", "text": "Photo captured"})
+
         # ---------------- FLIGHT MODES ----------------
 
         elif m_type == "MODE":
-            mode = d.get("Mode")
-            flight_modes.append(mode)
-            events_log.append(f"MODE CHANGED → {mode}")
+            # pymavlink resolves the mode NUMBER to a NAME itself (log.flightmode),
+            # using the vehicle type it already detected from this log's own boot
+            # message (Copter/Plane/Rover/Sub/Blimp) -- more reliable than a
+            # hand-rolled, vehicle-specific numeric table.
+            mode_name = log.flightmode or f"MODE {d.get('Mode')}"
+            flight_modes.append(mode_name)
+            t = rel_time(d["TimeUS"]) if "TimeUS" in d else 0
+            timeline.append({"t": t, "type": "MODE", "text": f"Mode changed → {mode_name}"})
 
         # ---------------- EVENTS / SYSTEM MESSAGES ----------------
 
         elif m_type in ["MSG", "EV"]:
-            txt = d.get("Message", d.get("Text", "Event"))
-            events_log.append(f"[{m_type}] {txt}")
+            t = rel_time(d["TimeUS"]) if "TimeUS" in d else 0
+
+            if m_type == "MSG":
+                txt = d.get("Message", "Event")
+                timeline.append({"t": t, "type": "MSG", "text": txt})
+
+                low = txt.lower()
+                if "disarm" in low:
+                    arm_events.append({"t": t, "state": "DISARMED"})
+                    if "crash" in low:
+                        alerts.append("CRITICAL: CRASH DETECTED (ArduPilot crash-check triggered auto-disarm)")
+                elif "armed" in low:
+                    arm_events.append({"t": t, "state": "ARMED"})
+
+            else:  # EV -- dataflash only logs a numeric event ID here, no text.
+                # We don't have a verified ArduPilot LogEvent ID table in this
+                # environment, so we deliberately show the raw ID rather than
+                # guess a label (e.g. mislabeling ARMED/DISARMED in a crash
+                # report would be worse than an unlabeled but honest entry).
+                timeline.append({"t": t, "type": "EV", "text": f"Event ID {d.get('Id')}"})
 
     # mavutil keeps the log file open for the lifetime of this object; close
     # it explicitly so the caller can safely delete the uploaded file right
@@ -420,17 +570,40 @@ def process_log(file_path, drone_model=None):
     log.close()
 
     # =====================================================
+    # FLIGHT / SESSION DURATION
+    # =====================================================
+
+    session_duration_min = round((end_ts - start_ts) / 60000000, 2) if start_ts and end_ts else 0
+
+    log_disarmed = params_dump.get("LOG_DISARMED", 0)
+    first_arm = next((e["t"] for e in arm_events if e["state"] == "ARMED"), None)
+    last_disarm = next((e["t"] for e in reversed(arm_events) if e["state"] == "DISARMED"), None)
+
+    if first_arm is not None and last_disarm is not None and last_disarm > first_arm:
+        flight_duration_min = round((last_disarm - first_arm) / 60, 2)
+        flight_duration_source = "arm/disarm markers found in the log"
+    elif not log_disarmed:
+        # LOG_DISARMED=0 (this fleet's default): the dataflash log only records
+        # while armed, so its full span IS the flight duration.
+        flight_duration_min = session_duration_min
+        flight_duration_source = "log only records while armed (LOG_DISARMED=0)"
+    else:
+        flight_duration_min = session_duration_min
+        flight_duration_source = "no arm/disarm marker found — showing full log span"
+
+    # =====================================================
     # FLIGHT STATISTICS
     # =====================================================
 
-    duration_min = round((end_ts - start_ts) / 60000000, 2) if start_ts and end_ts else 0
-
     voltage_drop = round(max(tele["volt"]) - min(tele["volt"]), 2) if tele["volt"] else 0
     min_volt = round(min(tele["volt"]), 2) if tele["volt"] else 0
+    initial_volt = round(tele["volt"][0], 2) if tele["volt"] else 0
+    final_volt = round(tele["volt"][-1], 2) if tele["volt"] else 0
     avg_current = round(sum(tele["curr"]) / len(tele["curr"]), 2) if tele["curr"] else 0
     max_current = round(max(tele["curr"]), 2) if tele["curr"] else 0
 
-    max_altitude = round(max(tele["alt_gps"]), 2) if tele["alt_gps"] else 0
+    max_gps_altitude = round(max(tele["alt_gps"]), 2) if tele["alt_gps"] else 0
+    max_baro_altitude = round(max(tele["alt_baro"]), 2) if tele["alt_baro"] else 0
 
     avg_sats = round(sum(tele["sats"]) / len(tele["sats"]), 2) if tele["sats"] else 0
     avg_hdop = round(sum(tele["hdop"]) / len(tele["hdop"]), 2) if tele["hdop"] else 0
@@ -470,6 +643,19 @@ def process_log(file_path, drone_model=None):
         if dist > 50:
             alerts.append("GPS POSITION JUMP DETECTED")
             break
+
+    # ---------------- SUDDEN-VARIATION / POSSIBLE CRASH DETECTION ----------------
+
+    sudden_events = detect_sudden_events(
+        tele["bat_time"], tele["volt"], tele["curr"],
+        tele["baro_time"], tele["alt_baro"],
+        tele["esc_time"], tele["esc_rpm"],
+    )
+    possible_incidents = correlate_incidents(sudden_events)
+
+    for inc in possible_incidents:
+        alerts.append(inc["text"])
+        timeline.append({"t": inc["t"], "type": "INCIDENT", "text": inc["text"]})
 
     # =====================================================
     # ALERT METRICS
@@ -554,7 +740,7 @@ def process_log(file_path, drone_model=None):
     # STATUS LOGIC
     # =====================================================
 
-    critical_keywords = ["CRITICAL", "THRUST"]
+    critical_keywords = ["CRITICAL", "THRUST", "POSSIBLE CRASH"]
     warning_keywords = ["HIGH", "LOW", "POOR", "INSTABILITY", "WARNING", "DEVIATE", "CLIPPING"]
 
     alert_text = " ".join(alerts)
@@ -567,18 +753,36 @@ def process_log(file_path, drone_model=None):
         status = "PASS"
 
     # =====================================================
+    # ALERT CATEGORIES (failsafes / EKF / battery / GPS / ... each their own section)
+    # =====================================================
+
+    alerts = list(dict.fromkeys(alerts))  # de-duplicate, keep order
+
+    alert_categories = defaultdict(list)
+    for a in alerts:
+        alert_categories[categorize_alert(a)].append(a)
+    alert_categories = dict(alert_categories)
+
+    # =====================================================
     # TELEMETRY DETAILS TABLE
     # =====================================================
 
     details = [
         {
             "cat": "1.0 Flight",
-            "param": f"Flight Duration ({duration_min})",
-            "min": "-", "max": duration_min, "avg": "-", "dev": "-",
+            "param": f"Flight Duration, armed ({flight_duration_min})",
+            "min": "-", "max": flight_duration_min, "avg": "-", "dev": "-",
+        },
+        {
+            "cat": "1.0 Flight",
+            "param": f"Log/Session Duration ({session_duration_min})",
+            "min": "-", "max": session_duration_min, "avg": "-", "dev": "-",
         },
         {"cat": "1.0 Flight", "param": "GPS Altitude (M)", "std": 50, **get_stats(tele["alt_gps"], 50)},
         {"cat": "1.0 Flight", "param": "Barometer Altitude (M)", "std": 50, **get_stats(tele["alt_baro"], 50)},
 
+        {"cat": "2.0 Battery", "param": "Initial Voltage (V)", "min": "-", "max": initial_volt, "avg": "-", "dev": "-"},
+        {"cat": "2.0 Battery", "param": "Final Voltage (V)", "min": "-", "max": final_volt, "avg": "-", "dev": "-"},
         {"cat": "2.0 Battery", "param": "Voltage Drop (V)", "std": 1.5, **get_stats([voltage_drop], 1.5)},
         {"cat": "2.0 Battery", "param": "Average Current (A)", "std": 20, **get_stats(tele["curr"], 20)},
         {"cat": "2.0 Battery", "param": "Peak Current (A)", "std": 30, **get_stats([max_current], 30)},
@@ -610,6 +814,9 @@ def process_log(file_path, drone_model=None):
         details.append({"cat": "7.0 Rate Controller", "param": "Roll Rate Error (deg/s)", "std": 0, **get_stats([rate_roll_err])})
         details.append({"cat": "7.0 Rate Controller", "param": "Pitch Rate Error (deg/s)", "std": 0, **get_stats([rate_pitch_err])})
 
+    if tele["esc_rpm"]:
+        details.append({"cat": "8.0 Motors", "param": "Motor RPM", "std": 0, **get_stats(tele["esc_rpm"])})
+
     # =====================================================
     # CHART-READY TIME SERIES (downsampled for the browser)
     # =====================================================
@@ -628,6 +835,13 @@ def process_log(file_path, drone_model=None):
     gat, alt_g = downsample(tele["gps_time"], tele["alt_gps"])
     charts["altitude_gps"] = {"t": gat, "alt": alt_g}
 
+    # Altitude vs voltage on one timeline (two different sample rates/x-series,
+    # Chart.js handles that fine when each dataset carries its own {x,y} points).
+    charts["altitude_vs_voltage"] = {
+        "alt_t": bat, "alt": alt_b,
+        "volt_t": bt, "volt": volt,
+    }
+
     if tele["att_time"]:
         at, roll_a, roll_d = downsample_multi(tele["att_time"], tele["roll_act"], tele["roll_des"])
         _, pitch_a, pitch_d = downsample_multi(tele["att_time"], tele["pitch_act"], tele["pitch_des"])
@@ -643,11 +857,32 @@ def process_log(file_path, drone_model=None):
     else:
         charts["vibration"] = {"t": [], "x": [], "y": [], "z": []}
 
+    if tele["esc_rpm"]:
+        et, erpm = downsample(tele["esc_time"], tele["esc_rpm"])
+        charts["motor_rpm"] = {"t": et, "rpm": erpm}
+    else:
+        charts["motor_rpm"] = {"t": [], "rpm": []}
+
     display_gps_path = decimate_list(gps_path, max_points=2000)
 
-    conclusion = build_conclusion(status, alerts, {
-        "duration": duration_min,
-    }, param_deviations, drone_model)
+    # Heading at each displayed GPS point, derived from ATT.Yaw where a timestamp
+    # lines up, else from ground-track bearing between consecutive points -- used
+    # to orient the drone icon during flight replay.
+    replay_headings = []
+    if tele["att_time"] and tele["yaw_act"]:
+        for i in range(len(display_gps_path)):
+            frac = i / max(len(display_gps_path) - 1, 1)
+            idx = min(int(frac * (len(tele["yaw_act"]) - 1)), len(tele["yaw_act"]) - 1)
+            replay_headings.append(round(tele["yaw_act"][idx], 1))
+
+    timeline.sort(key=lambda e: e["t"])
+    events_log = [f"[{e['t']}s] [{e['type']}] {e['text']}" for e in timeline]
+
+    conclusion = build_conclusion(
+        status, alerts,
+        {"flight_duration": flight_duration_min},
+        param_deviations, drone_model, possible_incidents,
+    )
 
     # =====================================================
     # RETURN
@@ -656,24 +891,42 @@ def process_log(file_path, drone_model=None):
     return {
         "filename": os.path.basename(file_path),
         "status": status,
-        "alerts": list(dict.fromkeys(alerts)),  # de-duplicate, keep order
+        "alerts": alerts,
+        "alert_categories": alert_categories,
         "details": details,
         "events": events_log,
+        "timeline": timeline,
         "params": params_dump,
         "gps_path": display_gps_path,
+        "replay_headings": replay_headings,
         "flight_modes": list(dict.fromkeys(flight_modes)),
         "charts": charts,
         "conclusion": conclusion,
         "baseline_file": baseline_file,
         "param_deviations": param_deviations,
+        "possible_incidents": possible_incidents,
+        "camera": {
+            "photo_count": len(photo_events),
+            "photo_times": photo_events[:200],
+            "note": (
+                "Video recording state isn't present in standard ArduPilot flight "
+                "logs (it's tracked by the camera/gimbal payload, not the flight "
+                "controller) -- only camera trigger (photo) events are shown here."
+            ),
+        },
 
         "summary": {
-            "duration": duration_min,
-            "max_altitude": max_altitude,
+            "flight_duration": flight_duration_min,
+            "flight_duration_source": flight_duration_source,
+            "session_duration": session_duration_min,
+            "max_gps_altitude": max_gps_altitude,
+            "max_baro_altitude": max_baro_altitude,
             "avg_current": avg_current,
             "max_current": max_current,
             "voltage_drop": voltage_drop,
             "min_voltage": min_volt,
+            "initial_voltage": initial_volt,
+            "final_voltage": final_volt,
             "avg_sats": avg_sats,
             "avg_hdop": avg_hdop,
             "max_vibration": max_vibe,

@@ -1,5 +1,7 @@
 import json
 import os
+import shutil
+from datetime import datetime, timezone
 
 from flask import Flask, render_template, request, send_file
 from werkzeug.utils import secure_filename
@@ -13,6 +15,8 @@ app = Flask(__name__)
 UPLOAD_FOLDER = 'uploads'
 REPORT_FOLDER = 'reports_out'
 SESSION_FOLDER = 'sessions'
+ARCHIVE_FOLDER = 'archive/logs'
+MANIFEST_PATH = 'archive/manifest.jsonl'
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
@@ -20,6 +24,7 @@ app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(REPORT_FOLDER, exist_ok=True)
 os.makedirs(SESSION_FOLDER, exist_ok=True)
+os.makedirs(ARCHIVE_FOLDER, exist_ok=True)
 
 ALLOWED_EXTENSIONS = {'bin', 'log', 'tlog'}
 
@@ -58,6 +63,37 @@ def load_session(report_id):
 
     session_cache[report_id] = data
     return data
+
+
+def archive_log(upload_path, filename, report_id, mission, report):
+    """Every uploaded log is kept permanently, alongside a manifest entry
+    recording its outcome ('cause'), so nothing is lost even if the person
+    never downloads the Word/Excel report."""
+    archived_name = f"{report_id}_{filename}"
+    archived_path = os.path.join(ARCHIVE_FOLDER, archived_name)
+
+    try:
+        shutil.move(upload_path, archived_path)
+    except OSError:
+        app.logger.warning("Could not archive upload %s", upload_path, exc_info=True)
+        archived_path = None
+
+    entry = {
+        "report_id": report_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "original_filename": filename,
+        "archived_path": archived_path,
+        "mission": mission,
+        "status": report["status"],
+        "cause": report["alerts"][:5] if report["alerts"] else ["No anomalies detected"],
+        "conclusion": report.get("conclusion", []),
+    }
+
+    try:
+        with open(MANIFEST_PATH, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except OSError:
+        app.logger.warning("Could not write manifest entry for %s", report_id, exc_info=True)
 
 
 @app.route("/", methods=["GET", "POST"])
@@ -100,6 +136,7 @@ def index():
             }
 
             save_session(report_id, data)
+            archive_log(upload_path, filename, report_id, mission, report)
 
             return render_template(
                 "dashboard.html",
@@ -112,6 +149,8 @@ def index():
             return f"Processing Failed: {str(e)}", 500
 
         finally:
+            # archive_log() moves the file on success; this only cleans up
+            # if processing failed before the move happened.
             try:
                 if os.path.exists(upload_path):
                     os.remove(upload_path)

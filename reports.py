@@ -18,8 +18,10 @@ def generate_word_report(report_data, mission_info, output_path):
 
     doc.add_heading("Neosky India Ltd - Flight Log Analysis", 0)
 
+    summary = report_data.get("summary", {})
+
     doc.add_heading("1.0 Mission Details", level=1)
-    table = doc.add_table(rows=6, cols=2)
+    table = doc.add_table(rows=10, cols=2)
     table.style = "Table Grid"
     info = [
         ("Drone Model:", mission_info.get("drone")),
@@ -28,6 +30,10 @@ def generate_word_report(report_data, mission_info, output_path):
         ("Reported By:", mission_info.get("reported_by")),
         ("File Name:", report_data["filename"]),
         ("Health Status:", report_data["status"]),
+        ("Flight Duration (armed):", f"{summary.get('flight_duration')} min ({summary.get('flight_duration_source')})"),
+        ("Log/Session Duration:", f"{summary.get('session_duration')} min"),
+        ("Initial / Final Voltage:", f"{summary.get('initial_voltage')}V / {summary.get('final_voltage')}V"),
+        ("Camera:", f"{report_data.get('camera', {}).get('photo_count', 0)} photo trigger(s) logged"),
     ]
     for i, (k, v) in enumerate(info):
         table.rows[i].cells[0].text, table.rows[i].cells[1].text = k, str(v)
@@ -36,11 +42,13 @@ def generate_word_report(report_data, mission_info, output_path):
     for line in report_data.get("conclusion", []):
         doc.add_paragraph(line, style="List Bullet")
 
-    if report_data["alerts"]:
-        doc.add_heading("3.0 Alerts Detected", level=1)
-        for alert in report_data["alerts"]:
-            p = doc.add_paragraph(f" {alert}")
-            p.runs[0].bold = True
+    if report_data.get("alert_categories"):
+        doc.add_heading("3.0 Alerts by Category", level=1)
+        for category, items in report_data["alert_categories"].items():
+            doc.add_heading(category, level=2)
+            for alert in items:
+                p = doc.add_paragraph(f" {alert}")
+                p.runs[0].bold = True
 
     if report_data.get("param_deviations"):
         doc.add_heading(
@@ -75,6 +83,17 @@ def generate_word_report(report_data, mission_info, output_path):
             str(item["avg"]), f"{item['dev']}%",
         )
 
+    if report_data.get("timeline"):
+        doc.add_page_break()
+        doc.add_heading("6.0 Event Timeline (modes, errors, messages)", level=1)
+        t = doc.add_table(rows=1, cols=3)
+        t.style = "Table Grid"
+        for i, txt in enumerate(["Time (s)", "Type", "Message"]):
+            t.rows[0].cells[i].text = txt
+        for e in report_data["timeline"]:
+            row = t.add_row().cells
+            row[0].text, row[1].text, row[2].text = str(e["t"]), e["type"], e["text"]
+
     doc.add_page_break()
     doc.add_heading("Appendix: Full Parameter Dump", level=1)
     p_table = doc.add_table(rows=1, cols=2)
@@ -88,15 +107,25 @@ def generate_word_report(report_data, mission_info, output_path):
 
 def generate_excel(report_data, output_path):
     with pd.ExcelWriter(output_path) as writer:
+        summary = report_data.get("summary", {})
+        pd.DataFrame(
+            list(summary.items()), columns=["Metric", "Value"]
+        ).to_excel(writer, sheet_name="Summary", index=False)
+
         pd.DataFrame(report_data["details"]).to_excel(writer, sheet_name="Telemetry", index=False)
 
         pd.DataFrame(
             {"Conclusion": report_data.get("conclusion", [])}
         ).to_excel(writer, sheet_name="Conclusion", index=False)
 
-        pd.DataFrame(
-            {"Alerts": report_data["alerts"]}
-        ).to_excel(writer, sheet_name="Alerts", index=False)
+        alert_rows = [
+            {"Category": cat, "Alert": alert}
+            for cat, items in report_data.get("alert_categories", {}).items()
+            for alert in items
+        ]
+        pd.DataFrame(alert_rows, columns=["Category", "Alert"]).to_excel(
+            writer, sheet_name="Alerts", index=False
+        )
 
         if report_data.get("param_deviations"):
             pd.DataFrame(report_data["param_deviations"]).to_excel(
@@ -107,6 +136,6 @@ def generate_excel(report_data, output_path):
             list(report_data["params"].items()), columns=["Parameter", "Value"]
         ).to_excel(writer, sheet_name="Parameters", index=False)
 
-        pd.DataFrame(
-            report_data["events"], columns=["Messages"]
-        ).to_excel(writer, sheet_name="Messages", index=False)
+        pd.DataFrame(report_data.get("timeline", [])).to_excel(
+            writer, sheet_name="Timeline", index=False
+        )

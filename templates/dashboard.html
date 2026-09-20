@@ -38,7 +38,7 @@
         }
 
         .title img{
-            height:56px;
+            height:110px;
             margin-bottom:10px;
         }
 
@@ -76,32 +76,38 @@
 
         .summary-grid{
             display:grid;
-            grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
-            gap:20px;
+            grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
+            gap:16px;
             margin:30px 0;
         }
 
         .metric-card{
             background:#0f172a;
             color:white;
-            padding:25px;
+            padding:20px;
             border-radius:16px;
             text-align:center;
         }
+
+        .metric-card h4{ margin:0 0 6px 0; font-size:0.8em; opacity:0.8; }
+        .metric-card h2{ margin:0; font-size:1.4em; }
+        .metric-card small{ opacity:0.7; }
 
         .status-PASS{ background:#166534; }
         .status-WARNING{ background:#92400e; }
         .status-CRITICAL{ background:#991b1b; }
 
-        .alert-red{
-            background:#fee2e2;
-            color:#991b1b;
-            padding:20px;
+        .alert-section{
+            padding:18px 20px;
             border-radius:12px;
-            margin:20px 0;
+            margin:16px 0;
         }
 
-        .alert-red li{ margin:6px 0; }
+        .alert-section.severe{ background:#fee2e2; color:#991b1b; }
+        .alert-section.warn{ background:#fef3c7; color:#92400e; }
+
+        .alert-section h3{ margin-top:0; }
+        .alert-section li{ margin:6px 0; }
 
         .conclusion-box{
             background:#eff6ff;
@@ -110,6 +116,14 @@
             border-radius:12px;
             margin:20px 0;
             line-height:1.6;
+        }
+
+        .info-box{
+            background:#f8fafc;
+            border:1px solid #e2e8f0;
+            padding:16px 20px;
+            border-radius:12px;
+            margin:16px 0;
         }
 
         table{
@@ -127,15 +141,22 @@
             color:white;
         }
 
-        .terminal{
-            background:#0f172a;
-            color:#38bdf8;
-            padding:20px;
-            border-radius:12px;
-            height:300px;
+        .timeline-wrap{
+            max-height:400px;
             overflow-y:auto;
-            font-family:monospace;
         }
+
+        .type-tag{
+            font-family:monospace;
+            font-size:0.85em;
+            padding:2px 8px;
+            border-radius:6px;
+            background:#e2e8f0;
+        }
+        .type-MODE{ background:#dbeafe; }
+        .type-ERR{ background:#fee2e2; }
+        .type-INCIDENT{ background:#fecaca; font-weight:bold; }
+        .type-CAM{ background:#dcfce7; }
 
         .chart-grid{
             display:grid;
@@ -250,13 +271,34 @@
         </div>
 
         <div class="metric-card">
-            <h4>Duration (min)</h4>
-            <h2>{{ data.report.summary.duration }}</h2>
+            <h4>Flight Duration (armed)</h4>
+            <h2>{{ data.report.summary.flight_duration }} min</h2>
+            <small>{{ data.report.summary.flight_duration_source }}</small>
         </div>
 
         <div class="metric-card">
-            <h4>Max Altitude (m)</h4>
-            <h2>{{ data.report.summary.max_altitude }}</h2>
+            <h4>Log/Session Duration</h4>
+            <h2>{{ data.report.summary.session_duration }} min</h2>
+        </div>
+
+        <div class="metric-card">
+            <h4>GPS Altitude (max)</h4>
+            <h2>{{ data.report.summary.max_gps_altitude }} m</h2>
+        </div>
+
+        <div class="metric-card">
+            <h4>Baro Altitude (max)</h4>
+            <h2>{{ data.report.summary.max_baro_altitude }} m</h2>
+        </div>
+
+        <div class="metric-card">
+            <h4>Initial Voltage</h4>
+            <h2>{{ data.report.summary.initial_voltage }} V</h2>
+        </div>
+
+        <div class="metric-card">
+            <h4>Final Voltage</h4>
+            <h2>{{ data.report.summary.final_voltage }} V</h2>
         </div>
 
     </div>
@@ -270,19 +312,25 @@
         </ul>
     </div>
 
-    {% if data.report.alerts %}
-
-    <div class="alert-red">
-
-        <h3>Alerts Detected</h3>
-
-        <ul>
-        {% for a in data.report.alerts %}
-            <li>{{ a }}</li>
-        {% endfor %}
-        </ul>
-
+    <div class="info-box">
+        <strong>Camera:</strong> {{ data.report.camera.photo_count }} photo trigger(s) logged.
+        <br><small>{{ data.report.camera.note }}</small>
     </div>
+
+    {% if data.report.alert_categories %}
+
+    <h2>Alerts by Category</h2>
+
+    {% for category, items in data.report.alert_categories.items() %}
+        <div class="alert-section {{ 'severe' if category in ['Failsafes & Crash Detection', 'Possible Crash / Anomaly'] else 'warn' }}">
+            <h3>{{ category }} ({{ items|length }})</h3>
+            <ul>
+            {% for a in items %}
+                <li>{{ a }}</li>
+            {% endfor %}
+            </ul>
+        </div>
+    {% endfor %}
 
     {% endif %}
 
@@ -318,8 +366,18 @@
         </div>
 
         <div class="chart-box">
+            <h4>Baro Altitude vs Battery Voltage</h4>
+            <canvas id="chartAltVolt"></canvas>
+        </div>
+
+        <div class="chart-box">
             <h4>Vibration (VIBE, m/s/s)</h4>
             <canvas id="chartVibe"></canvas>
+        </div>
+
+        <div class="chart-box">
+            <h4>Motor RPM</h4>
+            <canvas id="chartRpm"></canvas>
         </div>
 
         <div class="chart-box">
@@ -413,16 +471,24 @@
 
     <br><br>
 
-    <h2>System Messages</h2>
+    <h2>Event Timeline</h2>
+    <p>Every mode change, decoded error, system message, and possible-crash flag, in chronological order. Flight modes are shown by name, not number.</p>
 
-    <div class="terminal">
-
-        {% for msg in data.report.events %}
-
-            <div>&gt; {{ msg }}</div>
-
+    <div class="timeline-wrap">
+    <table>
+        <thead>
+            <tr><th>Time (s)</th><th>Type</th><th>Message</th></tr>
+        </thead>
+        <tbody>
+        {% for e in data.report.timeline %}
+            <tr>
+                <td>{{ e.t }}</td>
+                <td><span class="type-tag type-{{ e.type }}">{{ e.type }}</span></td>
+                <td>{{ e.text }}</td>
+            </tr>
         {% endfor %}
-
+        </tbody>
+    </table>
     </div>
 
     {% endif %}
@@ -432,23 +498,25 @@
 <script>
 
 const gpsData = {{ data.report.gps_path|tojson if data else '[]' }};
+const headings = {{ data.report.replay_headings|tojson if data else '[]' }};
 const charts = {{ data.report.charts|tojson if data else '{}' }};
 
-function lineChart(canvasId, labels, datasets, yLabel){
+function lineChart(canvasId, datasets, yLabel, extraScales){
     const el = document.getElementById(canvasId);
     if(!el) return;
+    const scales = Object.assign({
+        x: { type: 'linear', title: { display: true, text: 'Time (s)' } },
+        y: { title: { display: true, text: yLabel } }
+    }, extraScales || {});
     new Chart(el, {
         type: 'line',
-        data: { labels: labels, datasets: datasets },
+        data: { datasets: datasets },
         options: {
             responsive: true,
             animation: false,
             parsing: false,
             elements: { point: { radius: 0 } },
-            scales: {
-                x: { title: { display: true, text: 'Time (s)' } },
-                y: { title: { display: true, text: yLabel } }
-            }
+            scales: scales
         }
     });
 }
@@ -458,14 +526,14 @@ function toXY(t, y){
 }
 
 if(charts.battery && charts.battery.t && charts.battery.t.length){
-    lineChart('chartVolt', charts.battery.t, [{
+    lineChart('chartVolt', [{
         label: 'Voltage (V)', data: toXY(charts.battery.t, charts.battery.volt),
         borderColor: '#0284c7', borderWidth: 2
     }], 'Volts');
 }
 
 if(charts.current && charts.current.t && charts.current.t.length){
-    lineChart('chartCurr', charts.current.t, [{
+    lineChart('chartCurr', [{
         label: 'Current (A)', data: toXY(charts.current.t, charts.current.curr),
         borderColor: '#dc2626', borderWidth: 2
     }], 'Amps');
@@ -485,26 +553,59 @@ if(charts.altitude_baro || charts.altitude_gps){
             borderColor: '#9333ea', borderWidth: 2
         });
     }
-    if(datasets.length) lineChart('chartAlt', [], datasets, 'Metres');
+    if(datasets.length) lineChart('chartAlt', datasets, 'Metres');
+}
+
+if(charts.altitude_vs_voltage && charts.altitude_vs_voltage.alt_t && charts.altitude_vs_voltage.alt_t.length){
+    lineChart('chartAltVolt', [
+        {
+            label: 'Baro Altitude (m)', yAxisID: 'yAlt',
+            data: toXY(charts.altitude_vs_voltage.alt_t, charts.altitude_vs_voltage.alt),
+            borderColor: '#16a34a', borderWidth: 2
+        },
+        {
+            label: 'Voltage (V)', yAxisID: 'yVolt',
+            data: toXY(charts.altitude_vs_voltage.volt_t, charts.altitude_vs_voltage.volt),
+            borderColor: '#0284c7', borderWidth: 2
+        }
+    ], 'Metres', {
+        y: { display: false },
+        yAlt: { type: 'linear', position: 'left', title: { display: true, text: 'Altitude (m)' } },
+        yVolt: { type: 'linear', position: 'right', title: { display: true, text: 'Voltage (V)' }, grid: { drawOnChartArea: false } }
+    });
 }
 
 if(charts.vibration && charts.vibration.t && charts.vibration.t.length){
-    lineChart('chartVibe', charts.vibration.t, [
+    lineChart('chartVibe', [
         { label: 'VibeX', data: toXY(charts.vibration.t, charts.vibration.x), borderColor: '#ef4444', borderWidth: 1.5 },
         { label: 'VibeY', data: toXY(charts.vibration.t, charts.vibration.y), borderColor: '#22c55e', borderWidth: 1.5 },
         { label: 'VibeZ', data: toXY(charts.vibration.t, charts.vibration.z), borderColor: '#3b82f6', borderWidth: 1.5 }
     ], 'm/s/s');
 }
 
+if(charts.motor_rpm && charts.motor_rpm.t && charts.motor_rpm.t.length){
+    lineChart('chartRpm', [{
+        label: 'RPM', data: toXY(charts.motor_rpm.t, charts.motor_rpm.rpm),
+        borderColor: '#f59e0b', borderWidth: 2
+    }], 'RPM');
+} else {
+    const el = document.getElementById('chartRpm');
+    if(el){
+        const ctx = el.getContext('2d');
+        ctx.font = '14px Segoe UI'; ctx.fillStyle = '#94a3b8';
+        ctx.fillText('No ESC RPM telemetry in this log', 10, 20);
+    }
+}
+
 if(charts.attitude_roll && charts.attitude_roll.t && charts.attitude_roll.t.length){
-    lineChart('chartRoll', charts.attitude_roll.t, [
+    lineChart('chartRoll', [
         { label: 'Actual', data: toXY(charts.attitude_roll.t, charts.attitude_roll.actual), borderColor: '#0284c7', borderWidth: 2 },
         { label: 'Desired', data: toXY(charts.attitude_roll.t, charts.attitude_roll.desired), borderColor: '#f97316', borderWidth: 1.5, borderDash: [5,5] }
     ], 'Degrees');
 }
 
 if(charts.attitude_pitch && charts.attitude_pitch.t && charts.attitude_pitch.t.length){
-    lineChart('chartPitch', charts.attitude_pitch.t, [
+    lineChart('chartPitch', [
         { label: 'Actual', data: toXY(charts.attitude_pitch.t, charts.attitude_pitch.actual), borderColor: '#0284c7', borderWidth: 2 },
         { label: 'Desired', data: toXY(charts.attitude_pitch.t, charts.attitude_pitch.desired), borderColor: '#f97316', borderWidth: 1.5, borderDash: [5,5] }
     ], 'Degrees');
@@ -512,14 +613,43 @@ if(charts.attitude_pitch && charts.attitude_pitch.t && charts.attitude_pitch.t.l
 
 let map;
 
+// Simple drone glyph (a quad-like arrow) as an SVG data URI, rotated per
+// heading via CSS so the replay marker shows direction of travel.
+function droneIcon(headingDeg){
+    const svg = `
+      <svg xmlns="http://www.w3.org/2000/svg" width="34" height="34" viewBox="0 0 34 34"
+           style="transform:rotate(${headingDeg}deg);">
+        <circle cx="17" cy="17" r="15" fill="#0284c7" fill-opacity="0.15"/>
+        <path d="M17 3 L24 26 L17 21 L10 26 Z" fill="#0284c7" stroke="white" stroke-width="1.5"/>
+      </svg>`;
+    return L.divIcon({
+        html: svg,
+        className: '',
+        iconSize: [34, 34],
+        iconAnchor: [17, 17]
+    });
+}
+
+function bearing(p1, p2){
+    const toRad = d => d * Math.PI / 180;
+    const toDeg = r => r * 180 / Math.PI;
+    const lat1 = toRad(p1[0]), lat2 = toRad(p2[0]);
+    const dLon = toRad(p2[1] - p1[1]);
+    const y = Math.sin(dLon) * Math.cos(lat2);
+    const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
+    return (toDeg(Math.atan2(y, x)) + 360) % 360;
+}
+
 if(gpsData.length > 0){
 
-    map = L.map('map').setView(gpsData[0],16);
+    map = L.map('map', { maxZoom: 22 }).setView(gpsData[0], 17);
 
     L.tileLayer(
         'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
         {
-            attribution:'OpenStreetMap'
+            attribution:'OpenStreetMap',
+            maxZoom: 21,
+            maxNativeZoom: 19
         }
     ).addTo(map);
 
@@ -555,15 +685,22 @@ function startReplay(){
         map.removeLayer(replayMarker);
     }
 
-    replayMarker = L.marker(
-        gpsData[0]
-    ).addTo(map);
+    const heading0 = headings.length ? headings[0] : 0;
+    replayMarker = L.marker(gpsData[0], { icon: droneIcon(heading0) }).addTo(map);
 
     const interval = setInterval(()=>{
 
-        replayMarker.setLatLng(
-            gpsData[idx]
-        );
+        replayMarker.setLatLng(gpsData[idx]);
+
+        let h;
+        if(headings.length === gpsData.length){
+            h = headings[idx];
+        } else if(idx < gpsData.length - 1){
+            h = bearing(gpsData[idx], gpsData[idx + 1]);
+        }
+        if(h !== undefined){
+            replayMarker.setIcon(droneIcon(h));
+        }
 
         idx++;
 
