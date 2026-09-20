@@ -1,0 +1,48 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: neosky
+      POSTGRES_PASSWORD: neosky
+      POSTGRES_DB: neosky
+    ports:
+      - "5432:5432"
+    volumes:
+      - neosky_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U neosky -d neosky"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://neosky:neosky@db:5432/neosky
+      JWT_SECRET: dev-secret-key-not-for-production
+      JWT_ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: "15"
+      REFRESH_TOKEN_EXPIRE_DAYS: "14"
+      CORS_ORIGINS: "http://localhost:3000,http://localhost:5173"
+      UPLOAD_DIR: /app/uploads
+      ENV: development
+    ports:
+      - "8000:8000"
+    volumes:
+      # database/schema.sql lives one level above backend/ in the repo;
+      # init_db.py resolves it as ../../database/schema.sql relative to
+      # scripts/, i.e. /database/schema.sql inside this container.
+      - ../database:/database:ro
+      - neosky_uploads:/app/uploads
+
+volumes:
+  neosky_pg_data:
+  neosky_uploads:

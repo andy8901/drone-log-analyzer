@@ -5,6 +5,7 @@ The database shape comes exclusively from ../database/schema.sql, executed
 once by scripts/init_db.py. The ORM only ever *maps* to tables that already
 exist.
 """
+
 from collections.abc import Generator
 
 from sqlalchemy import create_engine
