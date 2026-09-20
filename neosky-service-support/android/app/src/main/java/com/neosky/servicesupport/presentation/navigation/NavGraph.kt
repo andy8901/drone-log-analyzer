@@ -3,7 +3,15 @@ package com.neosky.servicesupport.presentation.navigation
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavType
@@ -25,22 +33,37 @@ import com.neosky.servicesupport.presentation.flights.AddFlightLogScreen
 import com.neosky.servicesupport.presentation.flights.FlightLogListScreen
 import com.neosky.servicesupport.presentation.invoices.InvoiceDetailScreen
 import com.neosky.servicesupport.presentation.invoices.InvoiceListScreen
+import com.neosky.servicesupport.presentation.maintenance.MaintenanceScreen
 import com.neosky.servicesupport.presentation.notifications.NotificationsScreen
 import com.neosky.servicesupport.presentation.profile.ProfileScreen
 import com.neosky.servicesupport.presentation.search.SearchScreen
 import com.neosky.servicesupport.presentation.tickets.CreateTicketScreen
 import com.neosky.servicesupport.presentation.tickets.TicketDetailScreen
 import com.neosky.servicesupport.presentation.tickets.TicketListScreen
+import com.neosky.servicesupport.presentation.warranty.WarrantyScreen
 
 private val topLevelRoutes = BottomNavDestination.entries.map { it.screen.route }.toSet()
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun NeoSkyNavHost(isLoggedIn: Boolean, isOffline: Boolean) {
+fun NeoSkyNavHost(
+    isLoggedIn: Boolean,
+    isOffline: Boolean,
+    pendingDeepLinkRoute: String? = null,
+    onDeepLinkConsumed: () -> Unit = {},
+) {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
     val showBottomBar = isLoggedIn && currentRoute in topLevelRoutes
     val showOfflineBanner = isLoggedIn && isOffline
+
+    LaunchedEffect(isLoggedIn, pendingDeepLinkRoute) {
+        if (isLoggedIn && pendingDeepLinkRoute != null) {
+            navController.navigate(pendingDeepLinkRoute)
+            onDeepLinkConsumed()
+        }
+    }
 
     Column {
         OfflineBanner(isOffline = showOfflineBanner)
@@ -166,6 +189,31 @@ fun NeoSkyNavHost(isLoggedIn: Boolean, isOffline: Boolean) {
                         onSaved = { navController.popBackStack() },
                         onBack = { navController.popBackStack() },
                     )
+                }
+
+                // Standalone Warranty/Maintenance routes — used by FCM deep links; the same
+                // screens are also embedded as tabs inside DroneDetailScreen.
+                composable(
+                    route = Screen.Warranty.route,
+                    arguments = listOf(navArgument("droneId") { type = NavType.StringType }),
+                ) {
+                    Scaffold(topBar = {
+                        TopAppBar(
+                            title = { Text("Warranty") },
+                            navigationIcon = { IconButton(onClick = { navController.popBackStack() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") } },
+                        )
+                    }) { padding -> WarrantyScreen(modifier = Modifier.padding(padding)) }
+                }
+                composable(
+                    route = Screen.Maintenance.route,
+                    arguments = listOf(navArgument("droneId") { type = NavType.StringType }),
+                ) {
+                    Scaffold(topBar = {
+                        TopAppBar(
+                            title = { Text("Maintenance") },
+                            navigationIcon = { IconButton(onClick = { navController.popBackStack() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") } },
+                        )
+                    }) { padding -> MaintenanceScreen(modifier = Modifier.padding(padding)) }
                 }
 
                 // ------------------------------------------------------------ Invoices
