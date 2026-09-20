@@ -414,6 +414,11 @@ def process_log(file_path, drone_model=None):
             txt = d.get("Message", d.get("Text", "Event"))
             events_log.append(f"[{m_type}] {txt}")
 
+    # mavutil keeps the log file open for the lifetime of this object; close
+    # it explicitly so the caller can safely delete the uploaded file right
+    # after (on Windows, deleting a still-open file raises PermissionError).
+    log.close()
+
     # =====================================================
     # FLIGHT STATISTICS
     # =====================================================
