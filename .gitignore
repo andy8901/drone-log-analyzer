@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.idea/
+
+uploads/*
+!uploads/.gitkeep
+
+reports/
+reports_out/*
+!reports_out/.gitkeep
+
+sessions/*
+!sessions/.gitkeep
+
+.env
+*.venv/
+venv/
