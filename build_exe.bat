@@ -19,7 +19,7 @@ if errorlevel 1 (
     echo mode that produces a .exe that builds "successfully" but then
     echo crashes with "ModuleNotFoundError" when you run it -- PyInstaller
     echo bundles whatever the interpreter it runs under can see, so if the
-    echo wrong Python (not your activated venv's) ends up on PATH, the
+    echo wrong Python ^(not your activated venv's^) ends up on PATH, the
     echo build silently omits packages that ARE installed, just not there.
     echo.
     echo Run this first, then re-run build_exe.bat:
