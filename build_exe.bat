@@ -31,10 +31,27 @@ if errorlevel 1 (
     exit /b 1
 )
 
+REM Bake the current git commit into a VERSION file bundled into the .exe,
+REM so the dashboard's version footer shows which revision you built from
+REM even though the packaged .exe has no .git folder inside it to check at
+REM runtime (app.py falls back to reading this file when `git rev-parse`
+REM isn't available, which is always the case once frozen).
+set GIT_REV=
+for /f "delims=" %%i in ('git rev-parse --short HEAD 2^>NUL') do set GIT_REV=%%i
+if "%GIT_REV%"=="" (
+    echo unknown> VERSION
+    echo Could not determine a git revision ^(not a git checkout, or git not
+    echo on PATH^) -- the .exe's version footer will show "unknown".
+) else (
+    echo %GIT_REV%> VERSION
+    echo Baking in version %GIT_REV%
+)
+
 python -m PyInstaller --onefile --name NeoskyDroneAnalyzer ^
     --add-data "templates;templates" ^
     --add-data "static;static" ^
     --add-data "baselines;baselines" ^
+    --add-data "VERSION;." ^
     --hidden-import=pymavlink.dialects.v20.ardupilotmega ^
     --hidden-import=pymavlink.dialects.v10.ardupilotmega ^
     --collect-submodules pymavlink ^

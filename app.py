@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import subprocess
 from datetime import datetime, timezone
 
 from flask import Flask, render_template, request, send_file
@@ -33,6 +34,44 @@ os.makedirs(SESSION_FOLDER, exist_ok=True)
 os.makedirs(ARCHIVE_FOLDER, exist_ok=True)
 
 ALLOWED_EXTENSIONS = {'bin', 'log', 'tlog'}
+
+
+def get_app_version():
+    """Short git commit hash for the dashboard's version footer, so it's
+    obvious which revision is actually running after a `git pull` (handy
+    when troubleshooting -- e.g. a stale copy left over from a nested/
+    duplicate clone). `git rev-parse` works whenever running from a git
+    clone; the packaged .exe has no .git bundled inside, so it falls back
+    to a VERSION file baked in at build time (see build_exe.bat)."""
+    app_dir = os.path.dirname(os.path.abspath(__file__))
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=app_dir, capture_output=True, text=True, timeout=3,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    try:
+        with open(os.path.join(app_dir, "VERSION")) as f:
+            version = f.read().strip()
+            if version:
+                return version
+    except OSError:
+        pass
+
+    return "unknown"
+
+
+APP_VERSION = get_app_version()
+
+
+@app.context_processor
+def inject_version():
+    return {"app_version": APP_VERSION}
 
 # In-process cache for the common case (same worker serves the export right
 # after the upload). Every result is also written to disk so exports still
