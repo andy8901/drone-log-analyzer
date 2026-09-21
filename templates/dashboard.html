@@ -137,6 +137,54 @@
             margin:16px 0;
         }
 
+        .rca-box{
+            background:#f8fafc;
+            border:1px solid #e2e8f0;
+            border-left:6px solid #64748b;
+            padding:20px;
+            border-radius:12px;
+            margin:20px 0;
+            line-height:1.6;
+        }
+        .rca-box.crash{ background:#fef2f2; border-left-color:#dc2626; }
+        .rca-box.warning{ background:#fffbeb; border-left-color:#d97706; }
+        .rca-box.normal{ background:#f0fdf4; border-left-color:#16a34a; }
+
+        .rca-badges{
+            display:flex;
+            flex-wrap:wrap;
+            gap:8px;
+            margin:8px 0 16px;
+        }
+
+        .badge{
+            display:inline-block;
+            padding:4px 12px;
+            border-radius:999px;
+            font-size:0.82em;
+            font-weight:bold;
+            color:white;
+            background:#64748b;
+        }
+        .badge-CRITICAL, .badge-CONFIRMED_CRASH{ background:#b91c1c; }
+        .badge-HIGH, .badge-PROBABLE_CRASH{ background:#dc2626; }
+        .badge-MEDIUM, .badge-POSSIBLE_LOSS_OF_CONTROL{ background:#d97706; }
+        .badge-LOW, .badge-WARNING{ background:#ca8a04; }
+        .badge-NONE, .badge-NORMAL{ background:#16a34a; }
+
+        .rca-box table{ margin:10px 0 6px; }
+        .rca-box .category-col{ font-weight:bold; white-space:nowrap; }
+        .rca-box .role-primary{ color:#b91c1c; font-weight:bold; }
+        .rca-box .role-preceding{ color:#92400e; }
+        .rca-box .role-secondary{ color:#334155; }
+
+        .rca-disclaimer{
+            font-size:0.82em;
+            color:#64748b;
+            margin-top:14px;
+            font-style:italic;
+        }
+
         table{
             width:100%;
             border-collapse:collapse;
@@ -366,6 +414,75 @@
         {% endfor %}
         </ul>
     </div>
+
+    {% if data.report.rca %}
+    {% set rca = data.report.rca %}
+    <div class="rca-box {{ 'crash' if rca.incident_level in ['CONFIRMED_CRASH', 'PROBABLE_CRASH'] else ('warning' if rca.incident_level in ['POSSIBLE_LOSS_OF_CONTROL', 'WARNING'] else 'normal') }}">
+        <h3>Root-Cause Analysis</h3>
+
+        <div class="rca-badges">
+            <span class="badge badge-{{ rca.incident_level }}">Incident: {{ rca.incident_level.replace('_', ' ')|title }}</span>
+            <span class="badge badge-{{ rca.crash_confidence }}">Crash Confidence: {{ rca.crash_confidence }}</span>
+            {% if rca.root_cause %}
+            <span class="badge" style="background:#0f172a;">Primary Cause Confidence: {{ rca.root_cause.confidence }}</span>
+            {% endif %}
+        </div>
+
+        <p><strong>Why this confidence:</strong></p>
+        <ul>
+        {% for reason in rca.crash_confidence_reasons %}
+            <li>{{ reason }}</li>
+        {% endfor %}
+        </ul>
+
+        {% if rca.root_cause %}
+        <p><strong>Primary cause:</strong> [{{ rca.root_cause.category }}] {{ rca.root_cause.label }} &mdash; {{ rca.root_cause.text }} <em>({{ rca.root_cause.t_min }})</em></p>
+
+        {% if rca.preceding_context or rca.secondary_events %}
+        <table>
+            <thead>
+                <tr><th>Time</th><th>Category</th><th>Role</th><th>Evidence</th></tr>
+            </thead>
+            <tbody>
+            {% for e in rca.preceding_context %}
+                <tr>
+                    <td>{{ e.t_min }}</td>
+                    <td class="category-col">{{ e.label }}</td>
+                    <td class="role-preceding">Preceding (unresolved)</td>
+                    <td>{{ e.text }}</td>
+                </tr>
+            {% endfor %}
+                <tr>
+                    <td>{{ rca.root_cause.t_min }}</td>
+                    <td class="category-col">{{ rca.root_cause.label }}</td>
+                    <td class="role-primary">Primary</td>
+                    <td>{{ rca.root_cause.text }}</td>
+                </tr>
+            {% for e in rca.secondary_events %}
+                <tr>
+                    <td>{{ e.t_min }}</td>
+                    <td class="category-col">{{ e.label }}</td>
+                    <td class="role-secondary">Secondary</td>
+                    <td>{{ e.text }}</td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+        {% endif %}
+
+        {% if rca.contributing_factors %}
+        <p><strong>Contributing factors:</strong></p>
+        <ul>
+        {% for f in rca.contributing_factors %}
+            <li>{{ f }}</li>
+        {% endfor %}
+        </ul>
+        {% endif %}
+
+        <p class="rca-disclaimer">{{ rca.disclaimer }}</p>
+    </div>
+    {% endif %}
 
     <div class="info-box">
         <strong>Camera:</strong> {{ data.report.camera.photo_count }} photo trigger(s) logged.

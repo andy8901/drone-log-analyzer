@@ -48,8 +48,47 @@ def generate_word_report(report_data, mission_info, output_path):
     for line in report_data.get("conclusion", []):
         doc.add_paragraph(line, style="List Bullet")
 
+    rca = report_data.get("rca")
+    if rca:
+        doc.add_heading("3.0 Root-Cause Analysis", level=1)
+        doc.add_paragraph(f"Incident: {rca['incident_level'].replace('_', ' ').title()}")
+        doc.add_paragraph(f"Crash Confidence: {rca['crash_confidence']}")
+        for reason in rca.get("crash_confidence_reasons", []):
+            doc.add_paragraph(reason, style="List Bullet")
+
+        root_cause = rca.get("root_cause")
+        if root_cause:
+            doc.add_paragraph(
+                f"Primary Cause ({root_cause['confidence']} confidence): "
+                f"[{root_cause['category']}] {root_cause['label']} -- {root_cause['text']} "
+                f"({root_cause.get('t_min', root_cause['t'])})"
+            ).runs[0].bold = True
+
+            evidence_rows = (
+                [(e, "Preceding (unresolved)") for e in rca.get("preceding_context", [])]
+                + [(root_cause, "Primary")]
+                + [(e, "Secondary") for e in rca.get("secondary_events", [])]
+            )
+            t = doc.add_table(rows=1, cols=4)
+            t.style = "Table Grid"
+            for i, txt in enumerate(["Time (mm:ss)", "Category", "Role", "Evidence"]):
+                t.rows[0].cells[i].text = txt
+            for e, role in evidence_rows:
+                row = t.add_row().cells
+                row[0].text, row[1].text, row[2].text, row[3].text = (
+                    e.get("t_min", str(e["t"])), e["label"], role, e["text"],
+                )
+
+        if rca.get("contributing_factors"):
+            doc.add_paragraph("Contributing factors:")
+            for f in rca["contributing_factors"]:
+                doc.add_paragraph(f, style="List Bullet")
+
+        p = doc.add_paragraph(rca["disclaimer"])
+        p.runs[0].italic = True
+
     if report_data.get("alert_categories"):
-        doc.add_heading("3.0 Alerts by Category", level=1)
+        doc.add_heading("4.0 Alerts by Category", level=1)
         for category, items in report_data["alert_categories"].items():
             doc.add_heading(category, level=2)
             for alert in items:
@@ -58,7 +97,7 @@ def generate_word_report(report_data, mission_info, output_path):
 
     if report_data.get("param_deviations"):
         doc.add_heading(
-            f"4.0 Parameter Deviations vs Baseline ({report_data.get('baseline_file')})",
+            f"5.0 Parameter Deviations vs Baseline ({report_data.get('baseline_file')})",
             level=1,
         )
         t = doc.add_table(rows=1, cols=3)
@@ -71,7 +110,7 @@ def generate_word_report(report_data, mission_info, output_path):
                 dev["param"], str(dev["baseline"]), str(dev["actual"]),
             )
 
-    doc.add_heading("5.0 Telemetry Summary", level=1)
+    doc.add_heading("6.0 Telemetry Summary", level=1)
     current_cat = ""
     t = None
     for item in report_data["details"]:
@@ -91,7 +130,7 @@ def generate_word_report(report_data, mission_info, output_path):
 
     if report_data.get("timeline"):
         doc.add_page_break()
-        doc.add_heading("6.0 Event Timeline (modes, errors, messages)", level=1)
+        doc.add_heading("7.0 Event Timeline (modes, errors, messages)", level=1)
         t = doc.add_table(rows=1, cols=3)
         t.style = "Table Grid"
         for i, txt in enumerate(["Time (mm:ss)", "Type", "Message"]):
@@ -123,6 +162,39 @@ def generate_excel(report_data, output_path):
         pd.DataFrame(
             {"Conclusion": report_data.get("conclusion", [])}
         ).to_excel(writer, sheet_name="Conclusion", index=False)
+
+        rca = report_data.get("rca")
+        if rca:
+            rca_summary_rows = [
+                {"Field": "Incident Level", "Value": rca["incident_level"]},
+                {"Field": "Crash Confidence", "Value": rca["crash_confidence"]},
+                {"Field": "Confidence Reasons", "Value": " | ".join(rca.get("crash_confidence_reasons", []))},
+            ]
+            root_cause = rca.get("root_cause")
+            if root_cause:
+                rca_summary_rows.append({
+                    "Field": "Primary Cause",
+                    "Value": f"[{root_cause['category']}] {root_cause['label']} -- {root_cause['text']}",
+                })
+                rca_summary_rows.append({"Field": "Primary Cause Confidence", "Value": root_cause["confidence"]})
+            rca_summary_rows.append({
+                "Field": "Contributing Factors",
+                "Value": " | ".join(rca.get("contributing_factors", [])),
+            })
+            rca_summary_rows.append({"Field": "Disclaimer", "Value": rca["disclaimer"]})
+            pd.DataFrame(rca_summary_rows).to_excel(writer, sheet_name="RCA", index=False)
+
+            if root_cause:
+                evidence_rows = (
+                    [{"Time (mm:ss)": e.get("t_min", e["t"]), "Category": e["label"], "Role": "Preceding (unresolved)", "Evidence": e["text"]}
+                     for e in rca.get("preceding_context", [])]
+                    + [{"Time (mm:ss)": root_cause.get("t_min", root_cause["t"]), "Category": root_cause["label"], "Role": "Primary", "Evidence": root_cause["text"]}]
+                    + [{"Time (mm:ss)": e.get("t_min", e["t"]), "Category": e["label"], "Role": "Secondary", "Evidence": e["text"]}
+                       for e in rca.get("secondary_events", [])]
+                )
+                pd.DataFrame(evidence_rows, columns=["Time (mm:ss)", "Category", "Role", "Evidence"]).to_excel(
+                    writer, sheet_name="RCA Evidence", index=False
+                )
 
         alert_rows = [
             {"Category": cat, "Alert": alert}
