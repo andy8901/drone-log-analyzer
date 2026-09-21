@@ -378,6 +378,9 @@ def process_log(file_path, drone_model=None):
     gps_path_time = []   # parallel to gps_path (same append points, so always aligned)
     arm_events = []      # [{t, state}] state in {"ARMED", "DISARMED"}, from MSG text or EV 10/11
     photo_events = []    # [t, ...] CAM trigger timestamps
+    mode_changes = []    # [(t, mode_name), ...] chronological, for RCA mode-at-time lookups
+    subsys_events = []   # [{t, subsys, text}] decoded ERR messages with code != 0, for RCA
+    crash_text_times = []  # [t, ...] timestamps of "Crash: Disarming" (or similar) MSG text
 
     start_ts = None
     end_ts = None
@@ -428,6 +431,7 @@ def process_log(file_path, drone_model=None):
                 severity = "CRITICAL" if subsys in CRITICAL_SUBSYSTEMS else "WARNING"
                 alerts.append(f"{severity}: {name} ERROR (code {code})")
                 timeline.append({"t": t, "type": "ERR", "text": f"{severity}: {name} ERROR (code {code})"})
+                subsys_events.append({"t": t, "subsys": subsys, "text": f"{name} ERROR (code {code})"})
 
                 if subsys == 16:
                     ekf_errors += 1
@@ -576,6 +580,17 @@ def process_log(file_path, drone_model=None):
                 for n in range(1, 9):
                     tele[f"rcout_c{n}"].append(d.get(f"C{n}", 0))
 
+        # ---------------- PILOT STICK INPUT (raw receiver PWM) ----------------
+        # Channel-to-function mapping (which Cn is roll/pitch) is resolved
+        # after the loop from this log's own RCMAP_ROLL/RCMAP_PITCH params.
+
+        elif m_type == "RCIN":
+            if "TimeUS" in d:
+                t = rel_time(d["TimeUS"])
+                tele["rcin_time"].append(t)
+                for n in range(1, 9):
+                    tele[f"rcin_c{n}"].append(d.get(f"C{n}", 1500))
+
         # ---------------- CAMERA TRIGGER ----------------
 
         elif m_type == "CAM":
@@ -594,6 +609,7 @@ def process_log(file_path, drone_model=None):
             flight_modes.append(mode_name)
             t = rel_time(d["TimeUS"]) if "TimeUS" in d else 0
             timeline.append({"t": t, "type": "MODE", "text": f"Mode changed → {mode_name}"})
+            mode_changes.append((t, mode_name))
 
         # ---------------- EVENTS / SYSTEM MESSAGES ----------------
 
@@ -609,6 +625,7 @@ def process_log(file_path, drone_model=None):
                     arm_events.append({"t": t, "state": "DISARMED"})
                     if "crash" in low:
                         alerts.append("CRITICAL: CRASH DETECTED (ArduPilot crash-check triggered auto-disarm)")
+                        crash_text_times.append(t)
                 elif "armed" in low:
                     arm_events.append({"t": t, "state": "ARMED"})
 
@@ -957,6 +974,29 @@ def process_log(file_path, drone_model=None):
     else:
         charts["vibration"] = {"t": [], "x": [], "y": [], "z": []}
 
+    # Identify which RCOU channels are actually motors from this log's own
+    # SERVOn_FUNCTION params (33-40 = Motor1-8); fall back to C1-C4 (the
+    # common quad layout) if that metadata isn't present. Used both for the
+    # motor-outputs fallback chart below and for RCA motor-imbalance
+    # detection (regardless of whether ESC RPM telemetry is also present).
+    motor_channels = []
+    for name, val in params_dump.items():
+        if not (name.startswith("SERVO") and name.endswith("_FUNCTION")):
+            continue
+        try:
+            fn = int(float(val))
+            n = int(name[len("SERVO"):-len("_FUNCTION")])
+        except (TypeError, ValueError):
+            continue
+        if fn in MOTOR_FUNCTION_IDS and 1 <= n <= 8:  # RCOU is only captured for C1-C8
+            motor_channels.append(n)
+    motor_channels.sort()
+
+    if not motor_channels:
+        motor_channels = [1, 2, 3, 4]
+
+    motor_series = {f"C{n}": tele[f"rcout_c{n}"] for n in motor_channels} if tele["rcout_time"] else {}
+
     if tele["esc_rpm"]:
         et, erpm = downsample(tele["esc_time"], tele["esc_rpm"])
         charts["motor_rpm"] = {"t": et, "rpm": erpm}
@@ -964,26 +1004,7 @@ def process_log(file_path, drone_model=None):
     else:
         charts["motor_rpm"] = {"t": [], "rpm": []}
 
-        # Fallback: no ESC RPM telemetry, so chart raw motor PWM output (RCOU)
-        # instead. Identify which RCOU channels are actually motors from this
-        # log's own SERVOn_FUNCTION params (33-40 = Motor1-8); fall back to
-        # C1-C4 (the common quad layout) if that metadata isn't present.
-        motor_channels = []
-        for name, val in params_dump.items():
-            if not (name.startswith("SERVO") and name.endswith("_FUNCTION")):
-                continue
-            try:
-                fn = int(float(val))
-                n = int(name[len("SERVO"):-len("_FUNCTION")])
-            except (TypeError, ValueError):
-                continue
-            if fn in MOTOR_FUNCTION_IDS and 1 <= n <= 8:  # RCOU is only captured for C1-C8
-                motor_channels.append(n)
-        motor_channels.sort()
-
-        if not motor_channels:
-            motor_channels = [1, 2, 3, 4]
-
+        # Fallback: no ESC RPM telemetry, so chart raw motor PWM output (RCOU) instead.
         if tele["rcout_time"]:
             rt, *rest = downsample_multi(
                 tele["rcout_time"], *[tele[f"rcout_c{n}"] for n in motor_channels]
@@ -1019,6 +1040,48 @@ def process_log(file_path, drone_model=None):
     )
 
     # =====================================================
+    # ROOT-CAUSE / CRASH ANALYSIS
+    # =====================================================
+
+    def _rcin_channel(param_name, default_ch):
+        ch = int(params_dump.get(param_name, default_ch))
+        series = tele.get(f"rcin_c{ch}")
+        # RCIN is only collected for C1-C8; fall back to the default channel
+        # (and ultimately an empty series, which classify_incident handles
+        # gracefully) rather than risk a length mismatch against rcin_time.
+        if series and len(series) == len(tele["rcin_time"]):
+            return series
+        return tele.get(f"rcin_c{default_ch}", [])
+
+    rcin_roll = _rcin_channel("RCMAP_ROLL", 1)
+    rcin_pitch = _rcin_channel("RCMAP_PITCH", 2)
+
+    from rca import classify_incident
+    rca_result = classify_incident(
+        alerts=alerts,
+        timeline=timeline,
+        possible_incidents=possible_incidents,
+        sudden_events=sudden_events,
+        subsys_events=subsys_events,
+        crash_text_detected=crash_text_times,
+        att_time=tele["att_time"], roll_act=tele["roll_act"], roll_des=tele["roll_des"],
+        pitch_act=tele["pitch_act"], pitch_des=tele["pitch_des"],
+        rcin_time=tele["rcin_time"], rcin_roll=rcin_roll, rcin_pitch=rcin_pitch,
+        rcout_time=tele["rcout_time"], motor_series=motor_series,
+        mode_changes=mode_changes,
+        roll_error=roll_error, pitch_error=pitch_error,
+    )
+
+    # Add mm:ss display strings for every timestamped RCA entry, matching
+    # the format already used in the main event timeline.
+    if rca_result.get("root_cause"):
+        rca_result["root_cause"]["t_min"] = format_mmss(rca_result["root_cause"]["t"])
+    for _e in rca_result.get("preceding_context", []):
+        _e["t_min"] = format_mmss(_e["t"])
+    for _e in rca_result.get("secondary_events", []):
+        _e["t_min"] = format_mmss(_e["t"])
+
+    # =====================================================
     # RETURN
     # =====================================================
 
@@ -1040,6 +1103,7 @@ def process_log(file_path, drone_model=None):
         "baseline_file": baseline_file,
         "param_deviations": param_deviations,
         "possible_incidents": possible_incidents,
+        "rca": rca_result,
         "camera": {
             "photo_count": len(photo_events),
             "photo_times": photo_events[:200],
